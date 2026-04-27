@@ -1,0 +1,38 @@
+# Secrets — never commit
+.env
+.env.*
+*.key
+*.pem
+secrets/
+keys/
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+.venv/
+venv/
+env/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Notebooks
+.ipynb_checkpoints/
+
+# OS / editor
+.DS_Store
+.vscode/
+.idea/
+*.swp
+
+# Data — usually too big or sensitive
+data/
+*.csv
+*.parquet
+*.db
+*.sqlite
+backtest_results/
+logs/
