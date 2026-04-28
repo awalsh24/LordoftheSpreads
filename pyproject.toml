@@ -4,6 +4,10 @@ version = "0.0.1"
 description = "Agent-augmented market-making bot for decentralized perpetual exchanges"
 readme = "README.md"
 requires-python = ">=3.11"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["code*"]
 dependencies = [
     # Hyperliquid official SDK
     "hyperliquid-python-sdk>=0.9.0",
