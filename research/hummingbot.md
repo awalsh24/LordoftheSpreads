@@ -101,16 +101,68 @@ Concrete asks for them, when the time comes:
 
 ---
 
-## Decision deferred until we test
+## Decision — 2026-04-30
 
-This file recommends Option B but doesn't commit. The right time to decide is when we're about to write the connector layer — we evaluate by trying. Steps:
+**Hybrid: Option B. Hummingbot connector wrapped in our own interface.**
 
-1. Spin up Hummingbot client in Docker. Connect to Hyperliquid testnet. Run a built-in pure market-making strategy with $0 risk. Just to see it work.
-2. In a separate scratch project, install `hyperliquid-python-sdk` from pip. Write 50 lines that subscribe to BTC L2 book and place a test limit order on testnet.
-3. Compare developer experience, reliability, observability.
-4. Decide.
+This is a provisional decision based on Track B (raw SDK) results. Track A (Hummingbot end-to-end) is deferred pending a funded testnet account but does not change the direction — it would only validate or add caveats to the Hummingbot side.
 
-This whole evaluation is a one-day exercise, not a week. We should not over-think it before doing it.
+---
+
+### Track B findings — raw `hyperliquid-python-sdk` (completed 2026-04-30)
+
+Script: `scratch/track_b_sdk_eval.py`. Run against testnet with an unfunded API wallet.
+
+**WebSocket — worked cleanly.**
+- Connected immediately to `wss://api.hyperliquid-testnet.xyz/ws` with no friction
+- `l2Book` subscription returned updates at ~0.5s intervals, 20 levels each side, clean JSON
+- `trades` subscription returned data; trades arrive **batched per block** — multiple trades share an identical exchange timestamp, meaning the exchange delivers a whole block's worth of trades at once and they are unordered within the block. This is important for the backtester: within-block trade ordering is not available from this feed, only between-block ordering.
+- Sample book data (BTC testnet, 2026-04-30):
+  ```
+  [BOOK #1] bid=76624.0 ask=76660.0 depth=20x20 exchange_ts=1777573535442
+  [BOOK #2] bid=76624.0 ask=76660.0 depth=20x20 exchange_ts=1777573535999
+  [BOOK #3] bid=76624.0 ask=76660.0 depth=20x20 exchange_ts=1777573536558
+  ```
+  Spread = $36 on testnet BTC. Update cadence ~0.5-0.6s, consistent with documented block time.
+
+**REST `/info` — worked cleanly.**
+- `Info(TESTNET_API_URL, skip_ws=True).all_mids()` returned BTC mid=76642.0 with no issues.
+
+**Order placement attempt — 293ms round-trip, clean error message.**
+- The SDK handles eth signing transparently; no boilerplate needed beyond `Account.from_key(private_key)`.
+- Wallet not yet authorized on testnet (API wallet not linked to a main account via the UI), so placement returned:
+  ```
+  {'status': 'err', 'response': 'User or API Wallet 0x... does not exist.'}
+  ```
+  Error is machine-readable and interpretable. Not a crash, not an ambiguous exception.
+
+**Surprises and gotchas:**
+1. **Trades are block-batched.** Multiple trades arrive simultaneously with the same `ts`. Within a block, their order is arbitrary from the WebSocket consumer's perspective. The backtester must not assume intra-block trade ordering.
+2. **API wallet authorization requires the UI.** Generating the keypair programmatically is easy (`eth_account`), but linking it to a main account requires a signed transaction via the Hyperliquid web app. There is no documented API-only path for this. This means initial account setup always requires the UI; ongoing bot operation does not.
+3. **`skip_ws=True` is required** for the `Info` constructor if you don't want it to open a background WebSocket connection. Not prominently documented; would have caused a hang in some contexts without it.
+4. **293ms order round-trip** from a European VPS. Acceptable for a strategy that quotes every few seconds; would be significant for a latency-sensitive strategy. Raw SDK adds no measurable overhead beyond network.
+
+---
+
+### Track A status — deferred
+
+Hummingbot Docker eval requires a funded testnet account to run the built-in MM strategy and observe fill events. The testnet UI (`app.hyperliquid-testnet.xyz`) was inaccessible during the eval window due to a browser/MetaMask issue. Track A is **deferred, not skipped**.
+
+When Track A runs, the specific things to verify:
+
+1. **Reconnect behavior under network drops.** Does the `hyperliquid_perpetual` connector recover cleanly and re-subscribe? Does it re-send open orders that were in-flight during the disconnect, or silently drop them? This is the most important reliability question.
+2. **Partial fill handling.** When a resting order is partially filled, does the connector emit the correct fill event with the right size, leaving the remainder in the book? Or does it incorrectly mark the order as fully filled / cancelled?
+3. **Rate limit behavior under heavy quote/cancel load.** A market-making strategy cancels and replaces quotes frequently. Does the connector throttle gracefully, or does it error and require manual recovery?
+
+---
+
+### What this means for Step 4
+
+Build `code/connectors/hyperliquid.py` as a clean async wrapper. The interface (the `ExchangeConnector` Protocol already documented below) stays fixed. The implementation initially wraps Hummingbot's `hyperliquid_perpetual` connector.
+
+**The raw SDK (Option C) remains viable.** Track B showed the SDK is clean, low-friction, and well-behaved. If wrapping the Hummingbot connector proves painful — because it resists extraction from the broader framework, or because its internal event model fights our async design — switching the implementation to the raw SDK is a contained change behind the interface. The interface is the bet; the implementation is not.
+
+The decision is Option B unless wrapping proves painful, in which case it becomes Option C. Either way the strategy and agent layers above the interface are unaffected.
 
 ---
 
