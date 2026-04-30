@@ -29,7 +29,9 @@ env/
 *.swp
 
 # Data — usually too big or sensitive
-data/
+# /data/ matches only the top-level data/ directory (recorded market data, too large to commit)
+# This must NOT match code/data/ (source package)
+/data/
 *.csv
 *.parquet
 *.db
