@@ -17,8 +17,16 @@ from __future__ import annotations
 
 import asyncio
 import sys
+from pathlib import Path
 
-from code.connectors.hyperliquid import HyperliquidConnector
+# The `code/` package name shadows Python's stdlib `code` module. Editable
+# installs add the project root via a .pth file, which lands after stdlib in
+# sys.path. Insert the project root explicitly so our package wins.
+_project_root = str(Path(__file__).resolve().parent.parent)
+if _project_root not in sys.path:
+    sys.path.insert(0, _project_root)
+
+from code.connectors.hyperliquid import HyperliquidConnector  # noqa: E402
 
 
 async def main() -> None:
