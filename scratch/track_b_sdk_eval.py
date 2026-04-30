@@ -2,16 +2,16 @@
 Track B eval: raw hyperliquid-python-sdk on testnet.
 
 Tests:
-  1. Connect to testnet API + WS
-  2. Subscribe to BTC l2Book + trades, print 5 of each
-  3. Place one limit order $5000 below mid (won't fill)
-  4. Wait 30s
-  5. Cancel the order
-  6. Print full lifecycle with latencies
+  1. Connect to testnet WS — subscribe to BTC l2Book + trades, print 5 of each
+  2. Query REST /info for BTC mid price
+  3. Attempt to place one limit bid $5000 below mid (0.001 BTC)
+     - Insufficient margin is caught and logged as expected, not a crash
+  4. If order placed: wait 30s, cancel, print lifecycle with latencies
+  5. Exit cleanly
 
-Reads credentials from .env in the current directory:
-  HL_MAIN_ADDRESS    - your main testnet wallet address (owns the funds)
-  HL_API_PRIVATE_KEY - API wallet private key (can trade, cannot withdraw)
+Reads from .env in the current directory:
+  HL_MAIN_ADDRESS    - main testnet wallet address (owns the account/funds)
+  HL_API_PRIVATE_KEY - API wallet private key (trades only, no withdrawals)
 
 Run from ~/hl-sdk-test/ (NOT inside LordoftheSpreads):
   pip install hyperliquid-python-sdk websockets python-dotenv
@@ -52,7 +52,9 @@ async def collect_ws_events() -> None:
     async with websockets.connect(WS_URL, ping_interval=20) as ws:
         for sub_type in ("l2Book", "trades"):
             await ws.send(
-                json.dumps({"method": "subscribe", "subscription": {"type": sub_type, "coin": "BTC"}})
+                json.dumps(
+                    {"method": "subscribe", "subscription": {"type": sub_type, "coin": "BTC"}}
+                )
             )
         print("[WS] Subscribed to l2Book + trades for BTC")
 
@@ -97,51 +99,81 @@ async def collect_ws_events() -> None:
 
 
 def run_order_lifecycle() -> None:
-    """Get BTC mid, place a limit bid $5000 below, wait 30s, cancel it."""
+    """
+    Query BTC mid, attempt a limit bid $5000 below mid.
+    Handles all failure modes (margin, auth, API errors) without crashing.
+    If order placed successfully: wait 30s then cancel.
+    """
     print("=== [ORDER] Starting order lifecycle ===")
 
-    info = Info(constants.TESTNET_API_URL, skip_ws=True)
-    wallet = Account.from_key(API_PRIVATE_KEY)
-    exchange = Exchange(wallet, constants.TESTNET_API_URL, account_address=MAIN_ADDRESS)
+    # Step 1: REST /info — get BTC mid
+    try:
+        info = Info(constants.TESTNET_API_URL, skip_ws=True)
+        mids = info.all_mids()
+        mid = float(mids["BTC"])
+        limit_px = round(mid - 5000, 1)
+        print(f"[ORDER] REST /info OK — BTC mid={mid:.1f}")
+        print(f"[ORDER] Placing bid at {limit_px:.1f} (${5000:.0f} below mid, 0.001 BTC)")
+    except Exception as exc:
+        print(f"[ORDER] ✗ Failed to fetch mid price: {exc}")
+        return
 
-    # Step 1: get current mid price
-    mids = info.all_mids()
-    mid = float(mids["BTC"])
-    limit_px = round(mid - 5000, 1)
-    print(f"[ORDER] BTC mid={mid:.1f}  →  placing bid at {limit_px:.1f}  (${5000:.0f} below mid, 0.001 BTC)")
+    # Step 2: attempt order placement
+    try:
+        wallet = Account.from_key(API_PRIVATE_KEY)
+        exchange = Exchange(wallet, constants.TESTNET_API_URL, account_address=MAIN_ADDRESS)
 
-    # Step 2: place order
-    t_place = time.perf_counter()
-    result = exchange.order("BTC", True, 0.001, limit_px, {"limit": {"tif": "Gtc"}})
-    place_ms = (time.perf_counter() - t_place) * 1000
-    print(f"[ORDER] Place response ({place_ms:.0f}ms): {result}")
+        t_place = time.perf_counter()
+        result = exchange.order("BTC", True, 0.001, limit_px, {"limit": {"tif": "Gtc"}})
+        place_ms = (time.perf_counter() - t_place) * 1000
+        print(f"[ORDER] Place response ({place_ms:.0f}ms): {result}")
+    except Exception as exc:
+        print(f"[ORDER] ✗ Exception during order placement: {exc}")
+        print("[ORDER] Exiting order lifecycle — WS results above are still valid.")
+        return
 
-    if result.get("status") != "ok":
-        print("[ORDER] ✗ Order placement failed — check balance and credentials.")
+    # Step 3: interpret response
+    status = result.get("status")
+    if status != "ok":
+        # Captures "err" responses — insufficient margin, bad auth, etc.
+        err = result.get("response", result)
+        print(f"[ORDER] ✗ Order rejected (expected if no testnet funds) — verbatim: {err}")
+        print("[ORDER] Skipping cancel — nothing to cancel.")
+        print("[ORDER] Lifecycle complete (order rejected path).\n")
         return
 
     statuses = result["response"]["data"]["statuses"]
-    if "resting" not in statuses[0]:
-        print(f"[ORDER] ✗ Order not resting — status: {statuses}")
+    first = statuses[0]
+
+    if "error" in first:
+        print(f"[ORDER] ✗ Order status error: {first['error']}")
+        print("[ORDER] Skipping cancel.\n")
         return
 
-    oid = statuses[0]["resting"]["oid"]
+    if "resting" not in first:
+        print(f"[ORDER] ✗ Unexpected status (filled immediately? wrong venue?): {first}")
+        print("[ORDER] Skipping cancel.\n")
+        return
+
+    oid = first["resting"]["oid"]
     print(f"[ORDER] ✓ Order resting on book — oid={oid}")
 
-    # Step 3: wait
-    print(f"[ORDER] Waiting 30 seconds before cancel ...")
+    # Step 4: wait then cancel
+    print("[ORDER] Waiting 30 seconds before cancel ...")
     time.sleep(30)
 
-    # Step 4: cancel
-    t_cancel = time.perf_counter()
-    cancel_result = exchange.cancel("BTC", oid)
-    cancel_ms = (time.perf_counter() - t_cancel) * 1000
-    print(f"[ORDER] Cancel response ({cancel_ms:.0f}ms): {cancel_result}")
+    try:
+        t_cancel = time.perf_counter()
+        cancel_result = exchange.cancel("BTC", oid)
+        cancel_ms = (time.perf_counter() - t_cancel) * 1000
+        print(f"[ORDER] Cancel response ({cancel_ms:.0f}ms): {cancel_result}")
 
-    if cancel_result.get("status") == "ok":
-        print("[ORDER] ✓ Order cancelled cleanly.")
-    else:
-        print("[ORDER] ✗ Cancel may have failed — check result above.")
+        if cancel_result.get("status") == "ok":
+            print("[ORDER] ✓ Order cancelled cleanly.")
+        else:
+            print(f"[ORDER] ✗ Cancel response not ok — verbatim: {cancel_result}")
+    except Exception as exc:
+        print(f"[ORDER] ✗ Exception during cancel: {exc}")
 
     print("[ORDER] Lifecycle complete.\n")
 
